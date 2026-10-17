@@ -2,42 +2,78 @@ name: Refresh id_token card
 
 on:
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "17 6 * * 0"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/**
+      - tests/**
+      - .github/workflows/refresh.yml
+  pull_request:
+    paths:
+      - scripts/**
+      - tests/**
+      - .github/workflows/refresh.yml
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: refresh-card
+  group: refresh-card-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test collection, privacy, and rendering
+        run: python3 -m unittest discover -s tests -v
+
   render:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Check for PROFILE_TOKEN
-        id: gate
         env:
           HAS_TOKEN: ${{ secrets.PROFILE_TOKEN != '' }}
         run: |
-          echo "ok=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
-          if [ "$HAS_TOKEN" != "true" ]; then echo "PROFILE_TOKEN secret not set; skipping refresh."; fi
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::PROFILE_TOKEN is missing. Configure the repository Actions secret; see docs/automation.md."
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.gate.outputs.ok == 'true'
+        with:
+          ref: ${{ github.sha }}
 
       - name: Render card
-        if: steps.gate.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.PROFILE_TOKEN }}
         run: python3 scripts/render_token.py
 
       - name: Commit if changed
-        if: steps.gate.outputs.ok == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add assets/id_token.svg
-          git diff --cached --quiet || { git commit -m "Refresh id_token card"; git push; }
+          git add -- assets/id_token.svg
+          if git diff --cached --quiet; then
+            echo 'Card already current.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            git commit -m "Refresh id_token card"
+            git push origin HEAD:refs/heads/main
+            echo 'Validated card committed and pushed to main.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report refresh failure
+        if: failure()
+        run: |
+          echo 'Refresh failed. Check the failed step and docs/automation.md. The workflow never publishes partial API results.' >> "$GITHUB_STEP_SUMMARY"
