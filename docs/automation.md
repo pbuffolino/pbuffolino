@@ -127,6 +127,35 @@ controllers before deciding whether a finding crosses a trust boundary. Neither
 path may be sourced from PR text, API responses, or other untrusted content. The
 CLI is not a service for accepting output paths from other users.
 
+### Checking settings safely
+
+Include unused participation features in the initial review alongside branch,
+workflow, and secret protections. For this personal profile, public visibility
+does not require public contribution channels. Use the feature checklist above
+when defining the review's scope, rather than waiting until closeout.
+
+After changing a setting, make a fresh GET request and compare the actual fields
+with the intended values. An accepted write does not prove that an unsupported
+field changed. Confirm scanner analyses and alert states separately from whether
+a scan job succeeded. A failed or unauthorized alert query means unverified
+coverage, not zero alerts. Environment-secret metadata proves the secret's name
+and location, not the stored token's permissions or expiration.
+
+These read-only examples keep output limited to configuration and alert metadata:
+
+```sh
+gh api repos/pbuffolino/pbuffolino --jq '{has_issues,has_discussions,has_projects,has_wiki,has_pages,has_downloads,pull_request_creation_policy}'
+gh api repos/pbuffolino/pbuffolino/rules/branches/main --jq '[.[] | {type,parameters}]'
+gh api repos/pbuffolino/pbuffolino/interaction-limits --jq '{limit,origin,expires_at}'
+gh api 'repos/pbuffolino/pbuffolino/code-scanning/alerts?state=open&ref=refs/heads/main' --paginate --jq '.[] | {number,rule:.rule.id,state}'
+```
+
+Quote query-bearing endpoints so zsh does not interpret `?` as a filename pattern.
+Use the repository root endpoint without a trailing slash. Check each command's
+exit status; inspect GitHub's sanitized error response when a request fails.
+Do not print raw secret-scanning alerts or broaden CLI permissions to make an
+account-level check appear complete.
+
 ## Verification and failure behavior
 
 Each run checks the authenticated owner, owned private repository visibility,
