@@ -20,9 +20,10 @@ Biography, links, interests, and other static claims remain manually maintained.
    Choose resource owner `pbuffolino`, **All repositories**, and repository
    **Metadata: Read-only**. Leave **Contents** and all other optional permissions
    at **No access**. Do not grant write access. GitHub documents Metadata read
-   access for both REST repository listing and language statistics. Compatibility
-   with this exact private GraphQL collection remains unverified until the first
-   token-backed run. If collection fails, stop and investigate the permission
+   access for both REST repository listing and language statistics. Validate each
+   newly configured token against the private GraphQL collection during setup;
+   REST permission documentation alone does not prove GraphQL access.
+   If collection fails, stop and investigate the permission
    requirement rather than broadening the token automatically.
    Set a finite expiration and a calendar reminder to rotate it before expiry.
 2. Save it as the **environment secret** `PROFILE_TOKEN` in `profile-data` under
@@ -70,6 +71,20 @@ Verify these GitHub settings before saving the token:
 - The default workflow token is read-only and cannot approve PRs. Secret scanning
   and secret-scanning push protection are enabled. `profile-data` allows only
   `main`, without tags or wildcard branch patterns.
+- Dependabot alerts and security updates are enabled, and weekly version-update
+  PRs monitor pinned Actions references. Alerts alone do not cover SHA-pinned
+  Actions. Review the new upstream commit, temporarily allow the exact new SHA
+  alongside the old one so PR tests can run, then remove the old SHA after the
+  update merges. Do not allow whole owners, unpinned tags, or automatic merges.
+- CodeQL default setup scans Python and Actions with the extended query suite
+  and local as well as remote input sources. Confirm completed analyses on the
+  current `main` revision; an enabled setting alone is not a clean scan. The
+  `main` ruleset requires CodeQL results and blocks high/critical security alerts
+  and error-level code alerts before merging.
+- Private vulnerability reporting is enabled. The unused wiki is disabled,
+  merged PR branches are deleted automatically, and the generated card branch
+  remains protected from deletion. Keep issues available for non-sensitive
+  reports; do not post credentials or private source data in public issues.
 
 This workflow contains no LLM, agent, issue-comment handler, or privileged
 `pull_request_target`/`workflow_run` trigger. It never interprets PR text, issues,
@@ -97,6 +112,13 @@ schedule remains unattended; adding a required environment reviewer would make
 every token-backed refresh wait for approval. GitHub's `contents: write` permission
 is repository-wide, so the publisher's fixed path is a code-level restriction,
 not a per-file credential scope. Complete immunity is not claimed.
+
+The local CLI's `--output` flag deliberately lets its caller select a preview
+destination. `GITHUB_STEP_SUMMARY` is a GitHub runner-provided file path. Both can
+be flagged by CodeQL's local-source path analysis; check their callers and input
+controllers before deciding whether a finding crosses a trust boundary. Neither
+path may be sourced from PR text, API responses, or other untrusted content. The
+CLI is not a service for accepting output paths from other users.
 
 ## Verification and failure behavior
 
@@ -156,6 +178,7 @@ References:
 - [GitHub token permission mappings](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
 - [GitHub repository and language endpoint permissions](https://docs.github.com/en/rest/repos/repos)
 - [GitHub Actions security guidance](https://docs.github.com/en/actions/reference/security/secure-use)
+- [GitHub Actions version updates](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/auto-update-actions)
 - [GitHub environment protection](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
 - [GitHub repository rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 - [GitHub contribution collection semantics](https://docs.github.com/en/graphql/reference/users#contributionscollection)
