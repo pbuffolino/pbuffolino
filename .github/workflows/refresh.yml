@@ -49,7 +49,7 @@ jobs:
           HAS_TOKEN: ${{ secrets.PROFILE_TOKEN != '' }}
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then
-            echo "::error::PROFILE_TOKEN is missing. Configure the repository Actions secret; see docs/automation.md."
+            echo "::error::PROFILE_TOKEN is missing. Configure the profile-data environment secret; see docs/automation.md."
             exit 1
           fi
 
