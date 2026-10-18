@@ -7,8 +7,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import textwrap
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import xml.etree.ElementTree as ET
 
@@ -109,6 +110,14 @@ class CollectionTests(unittest.TestCase):
         api.languages = {}
         self.assertEqual(card.fetch(api, "pbuffolino", START, START)[1], [])
 
+    def test_language_metadata_cannot_inject_markup_or_workflow_commands(self):
+        for name in ('<script>alert(1)</script>', 'Python\n::warning::private-sentinel',
+                     'x' * 65, '\u202ePython'):
+            api = FakeAPI()
+            api.languages = {name: 1}
+            with self.subTest(name=name), self.assertRaises(card.RefreshError):
+                card.fetch(api, "pbuffolino", START, START)
+
     def test_zero_current_year_uses_previous_year_private_evidence(self):
         api = FakeAPI(current=collection(private=0, public=0),
                       previous=collection(dt.date(2025, 1, 1), dt.date(2025, 12, 31)))
@@ -171,6 +180,21 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(card.RefreshError, "missing"):
             card.GitHub("")
 
+    @patch.object(card.urllib.request.OpenerDirector, "open")
+    def test_unexpected_api_destinations_never_receive_credentials(self, urlopen):
+        for path in ("https://other.example/", "//other.example/", "../user",
+                     "repos/pbuffolino/private/contents/passwords", "graphql#fragment",
+                     "user/repos?affiliation=owner&per_page=100&page=1&extra=true"):
+            with self.subTest(path=path), self.assertRaises(card.RefreshError):
+                card.GitHub("token-sentinel").api(path)
+        urlopen.assert_not_called()
+
+    @patch.object(card.urllib.request.OpenerDirector, "open")
+    def test_oversized_response_is_rejected(self, urlopen):
+        urlopen.return_value = io.BytesIO(b" " * (card.MAX_RESPONSE_BYTES + 1))
+        with self.assertRaisesRegex(card.RefreshError, "safety limit"):
+            card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
+
     def test_redirects_never_forward_credentials(self):
         with self.assertRaisesRegex(card.RefreshError, "redirect"):
             card.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.example/")
@@ -180,7 +204,7 @@ class RequestTests(unittest.TestCase):
     def test_retry_transient_error_then_success(self, urlopen, sleep):
         error = urllib.error.HTTPError("private-sentinel", 503, "private-sentinel", {}, None)
         urlopen.side_effect = [error, self.response({"ok": True})]
-        self.assertEqual(card.GitHub("token-sentinel").api("graphql"), {"ok": True})
+        self.assertEqual(card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"}), {"ok": True})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(1)
 
@@ -190,7 +214,7 @@ class RequestTests(unittest.TestCase):
         urlopen.side_effect = [urllib.error.HTTPError("private-sentinel", 403, "secret", {
             "X-RateLimit-Remaining": "0"}, None) for _ in range(3)]
         with self.assertRaisesRegex(card.RefreshError, "HTTP 403") as raised:
-            card.GitHub("token-sentinel").api("graphql")
+            card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
         self.assertNotIn("private-sentinel", str(raised.exception))
         self.assertEqual(urlopen.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
@@ -202,7 +226,7 @@ class RequestTests(unittest.TestCase):
                 urlopen.reset_mock()
                 urlopen.side_effect = urllib.error.HTTPError("private-sentinel", status, "secret", {}, None)
                 with self.assertRaises(card.RefreshError) as raised:
-                    card.GitHub("token-sentinel").api("graphql")
+                    card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
                 self.assertNotIn("sentinel", str(raised.exception))
                 self.assertEqual(urlopen.call_count, 1)
 
@@ -210,21 +234,21 @@ class RequestTests(unittest.TestCase):
     @patch.object(card.urllib.request.OpenerDirector, "open", side_effect=TimeoutError("private-sentinel"))
     def test_timeouts_are_bounded_and_sanitized(self, urlopen, sleep):
         with self.assertRaisesRegex(card.RefreshError, "three attempts"):
-            card.GitHub("token-sentinel").api("graphql")
+            card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
         self.assertEqual(urlopen.call_count, 3)
 
     @patch.object(card.urllib.request.OpenerDirector, "open")
     def test_graphql_partial_data_errors_are_rejected(self, urlopen):
         urlopen.return_value = self.response({"data": {"viewer": None}, "errors": [{"message": "private-sentinel"}]})
         with self.assertRaises(card.RefreshError) as raised:
-            card.GitHub("token-sentinel").api("graphql")
+            card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
         self.assertNotIn("private-sentinel", str(raised.exception))
 
     @patch.object(card.urllib.request.OpenerDirector, "open")
     def test_invalid_json_is_rejected_without_response_details(self, urlopen):
         urlopen.return_value = io.BytesIO(b'private-sentinel')
         with self.assertRaisesRegex(card.RefreshError, "invalid JSON") as raised:
-            card.GitHub("token-sentinel").api("graphql")
+            card.GitHub("token-sentinel").api("graphql", {"query": "query{viewer{login}}"})
         self.assertNotIn("sentinel", str(raised.exception))
 
     @patch.object(card.GitHub, "api", return_value={"data": {"viewer": {"login": "someone-else"}}})
@@ -234,6 +258,15 @@ class RequestTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_active_svg_variants_preserve_previous_card(self):
+        for content in unsafe_svgs():
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "card.svg"
+                path.write_text("previous")
+                with self.assertRaises((card.RefreshError, ET.ParseError)):
+                    card.write_card(path, content)
+                self.assertEqual(path.read_text(), "previous")
+
     def test_single_total_chart_metadata_escaping_and_zero_year(self):
         for now in (dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
                     dt.datetime(2024, 12, 31, tzinfo=dt.timezone.utc)):
@@ -287,6 +320,130 @@ class PublicationTests(unittest.TestCase):
             ET.fromstring(path.read_text())
             self.assertIn("GitHub contributions: 5", summary.read_text())
             self.assertNotIn("sentinel", log.getvalue() + summary.read_text() + path.read_text())
+
+
+def unsafe_svgs():
+    prefix = '<svg xmlns="http://www.w3.org/2000/svg"'
+    return [
+        prefix + ' onload="alert(1)"/>',
+        prefix + '><a href="https://other.example/">link</a></svg>',
+        prefix + '><animate attributeName="href"/></svg>',
+        prefix + '><style>text{fill:red}</style></svg>',
+        prefix + '><foreignObject/></svg>',
+        prefix + '><image href="https://other.example/"/></svg>',
+        prefix + '><rect fill="url(https://other.example/)"/></svg>',
+        prefix + r'><rect fill="\75rl(https://other.example/)"/></svg>',
+        prefix + '><rect style="fill:red"/></svg>',
+        prefix + '><script xmlns="https://other.example/"/></svg>',
+        '<?xml-stylesheet href="https://other.example/"?>' + prefix + '/>',
+        '<!DOCTYPE svg [<!ENTITY secret "private-sentinel">]>' + prefix + '>&secret;</svg>',
+    ]
+
+
+class PublisherBoundaryTests(unittest.TestCase):
+    """Execute the actual inline publisher using only synthetic inputs and HTTP mocks."""
+    source = "a" * 40
+    parent = "f" * 40
+    commit = "e" * 40
+
+    @classmethod
+    def setUpClass(cls):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/refresh.yml").read_text()
+        block = workflow.rsplit("          python3 -I - <<'PY'\n", 1)[1].split("          PY", 1)[0]
+        cls.program = compile(textwrap.dedent(block), "inline-publisher", "exec")
+
+    def run_publisher(self, svg=None, responses=None, encoded=None):
+        svg = svg if svg is not None else card.render(
+            "pbuffolino", dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc), {}, ["python"])
+        encoded = encoded if encoded is not None else card.base64.b64encode(svg.encode()).decode()
+        opener = Mock()
+        replies = responses if responses is not None else [
+            {"object": {"sha": self.source}}, {"object": {"sha": self.parent}}, {"tree": {"sha": "b" * 40}},
+            {"sha": "c" * 40}, {"sha": "d" * 40}, {"sha": self.commit},
+            {"object": {"sha": self.commit}}, {"object": {"sha": self.commit}}]
+        opener.open.side_effect = [r if isinstance(r, Exception) else io.BytesIO(json.dumps(r).encode())
+                                    for r in replies]
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary.md"
+            with patch.dict(os.environ, {"GH_TOKEN": "token-sentinel", "CARD_B64": encoded,
+                                        "SOURCE_SHA": self.source, "GITHUB_STEP_SUMMARY": str(summary)}, clear=True), \
+                    patch.object(card.urllib.request, "build_opener", return_value=opener), \
+                    contextlib.redirect_stderr(log):
+                try:
+                    exec(self.program, {})
+                    result = 0
+                except SystemExit as error:
+                    result = error.code
+            content = summary.read_text() if summary.exists() else ""
+        return result, opener.open.call_args_list, log.getvalue(), content
+
+    def test_writer_updates_only_fixed_asset_with_non_force_reference_update(self):
+        result, calls, log, summary = self.run_publisher()
+        self.assertEqual(result, 0)
+        requests = [call.args[0] for call in calls]
+        self.assertEqual(len(requests), 8)
+        self.assertTrue(all(r.full_url.startswith(
+            "https://api.github.com/repos/pbuffolino/pbuffolino/git/") for r in requests))
+        tree = json.loads(requests[4].data)
+        self.assertEqual(tree["tree"], [{"path": "assets/id_token.svg", "mode": "100644",
+                                         "type": "blob", "sha": "c" * 40}])
+        self.assertEqual(json.loads(requests[5].data)["parents"], [self.parent])
+        self.assertEqual(requests[6].method, "PATCH")
+        self.assertTrue(requests[6].full_url.endswith('/git/refs/heads/profile-card'))
+        self.assertEqual(json.loads(requests[6].data), {"sha": self.commit, "force": False})
+        self.assertFalse(any(r.get_method() != 'GET' and r.full_url.endswith('/main') for r in requests))
+        self.assertIn(self.commit, summary)
+        self.assertNotIn("sentinel", log + summary)
+
+    def test_untrusted_output_is_rejected_before_any_network_access(self):
+        for svg in unsafe_svgs() + ["<svg/>", "x" * 80_001]:
+            with self.subTest(svg=svg[:100]):
+                result, calls, log, summary = self.run_publisher(svg=svg)
+                self.assertEqual(result, 1)
+                self.assertEqual(calls, [])
+                self.assertEqual(summary, "")
+                self.assertNotIn("sentinel", log)
+        result, calls, _, _ = self.run_publisher(encoded="invalid-base64")
+        self.assertEqual((result, calls), (1, []))
+
+    def test_stale_source_causes_no_writes(self):
+        result, calls, _, summary = self.run_publisher(responses=[{"object": {"sha": "f" * 40}}])
+        self.assertEqual(result, 1)
+        self.assertEqual([c.args[0].get_method() for c in calls], ["GET"])
+        self.assertEqual(summary, "")
+
+    def test_failed_update_never_reports_success_or_exposes_raw_error(self):
+        responses = [{"object": {"sha": self.source}}, {"object": {"sha": self.parent}}, {"tree": {"sha": "b" * 40}},
+                     {"sha": "c" * 40}, {"sha": "d" * 40}, {"sha": self.commit},
+                     urllib.error.HTTPError("private-sentinel", 422, "token-sentinel", {}, None)]
+        result, calls, log, summary = self.run_publisher(responses=responses)
+        self.assertEqual(result, 1)
+        self.assertEqual(len(calls), 7)
+        self.assertEqual(summary, "")
+        self.assertNotIn("sentinel", log)
+
+    def test_failed_readback_is_not_reported_as_verified(self):
+        responses = [{"object": {"sha": self.source}}, {"object": {"sha": self.parent}}, {"tree": {"sha": "b" * 40}},
+                     {"sha": "c" * 40}, {"sha": "d" * 40}, {"sha": self.commit},
+                     {"object": {"sha": self.commit}}, {"object": {"sha": "f" * 40}}]
+        result, _, _, summary = self.run_publisher(responses=responses)
+        self.assertEqual(result, 1)
+        self.assertEqual(summary, "")
+
+    def test_workflow_keeps_data_and_write_credentials_in_separate_jobs(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/refresh.yml").read_text()
+        render, publisher = workflow.split("  render:\n", 1)[1].split("  publish:\n", 1)
+        self.assertIn("      contents: read\n", render)
+        self.assertIn("          persist-credentials: false\n", render)
+        self.assertIn("    environment: profile-data\n", render)
+        self.assertIn("      contents: write\n", publisher)
+        self.assertNotIn("secrets.", publisher)
+        self.assertNotIn("uses:", publisher)
+        self.assertNotIn("checkout", publisher.split("    steps:\n", 1)[0])
+        self.assertNotIn("${{", textwrap.dedent(workflow.rsplit("          python3 -I - <<'PY'\n", 1)[1]))
+        for trigger in ("pull_request_target:", "workflow_run:", "issue_comment:"):
+            self.assertNotIn(trigger, workflow)
 
 
 if __name__ == "__main__":

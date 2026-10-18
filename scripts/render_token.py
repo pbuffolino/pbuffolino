@@ -33,6 +33,13 @@ MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
 BG, PANEL, INK, MUTE = "#101b33", "#17264a", "#dce4f5", "#8391b5"
 CH, CP, CS, CN = "#ff8a7a", "#c3a6ff", "#5fd4c4", "#f3c77b"
 NS = "https://seeknay.com/claims"
+MAX_RESPONSE_BYTES = 2_000_000
+MAX_SVG_BYTES = 80_000
+SVG_TAGS = {"svg", "metadata", "rect", "text", "tspan", "path"}
+SVG_ATTRS = {"width", "height", "viewBox", "role", "aria-label", "x", "y", "rx",
+             "fill", "opacity", "font-family", "font-size", "font-weight", "text-anchor",
+             "d", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+             "{http://www.w3.org/XML/1998/namespace}space"}
 
 STATIC_CLAIMS = {
     "title": "Workforce Identity Architect",
@@ -68,6 +75,12 @@ class GitHub:
 
     def api(self, path, payload=None):
         """Bound retries; never expose URLs, response bodies, or credentials on failure."""
+        if not isinstance(path, str) or not re.fullmatch(
+                r"graphql|user/repos\?affiliation=owner&per_page=100&page=[1-9][0-9]{0,3}"
+                r"|repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/languages", path):
+            raise RefreshError("Unexpected GitHub API endpoint; no request was sent.")
+        if (path == "graphql") != (payload is not None):
+            raise RefreshError("Unexpected GitHub API request method; no request was sent.")
         body = None if payload is None else json.dumps(payload).encode()
         request = urllib.request.Request(
             "https://api.github.com/" + path, data=body,
@@ -78,7 +91,10 @@ class GitHub:
         for attempt in range(3):
             try:
                 with self.opener.open(request, timeout=20) as response:
-                    result = json.load(response)
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                    if len(raw) > MAX_RESPONSE_BYTES:
+                        raise RefreshError("GitHub response exceeded its safety limit.")
+                    result = json.loads(raw)
                 if isinstance(result, dict) and result.get("errors"):
                     raise RefreshError("GitHub returned GraphQL errors; no card was published.")
                 return result
@@ -186,7 +202,7 @@ def fetch(api, login, jan1, today):
         if not isinstance(languages, dict):
             raise RefreshError("GitHub returned invalid language data.")
         for language, size in languages.items():
-            if not isinstance(language, str) or not language:
+            if not isinstance(language, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 +#._-]{0,63}", language):
                 raise RefreshError("GitHub returned an invalid language name.")
             lang_bytes[language] = lang_bytes.get(language, 0) + count(size)
     langs = [language.lower() for language, _ in sorted(lang_bytes.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
@@ -302,12 +318,22 @@ def render(login, now, cal, langs):
             f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>' + "".join(o) + "</svg>")
 
 
-def write_card(path, svg):
+def validate_svg(svg):
+    if len(svg.encode("utf-8")) > MAX_SVG_BYTES or "<!" in svg or "<?" in svg:
+        raise RefreshError("SVG exceeds its safety limit or contains XML declarations.")
     root = ET.fromstring(svg)
     if root.tag != "{http://www.w3.org/2000/svg}svg":
         raise RefreshError("Renderer did not produce a valid SVG.")
-    if any(node.tag.rsplit("}", 1)[-1] in ("script", "foreignObject", "image") for node in root.iter()):
-        raise RefreshError("SVG contains unexpected active content.")
+    for node in root.iter():
+        if node.tag not in {"{http://www.w3.org/2000/svg}" + tag for tag in SVG_TAGS}:
+            raise RefreshError("SVG contains an unexpected element.")
+        for name, value in node.attrib.items():
+            if name not in SVG_ATTRS or re.search(r"[\\()\x00-\x1f\x7f]", value):
+                raise RefreshError("SVG contains an unexpected attribute or resource reference.")
+
+
+def write_card(path, svg):
+    validate_svg(svg)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
