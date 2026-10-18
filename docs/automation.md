@@ -81,10 +81,17 @@ Verify these GitHub settings before saving the token:
   current `main` revision; an enabled setting alone is not a clean scan. The
   `main` ruleset requires CodeQL results and blocks high/critical security alerts
   and error-level code alerts before merging.
-- Private vulnerability reporting is enabled. The unused wiki is disabled,
-  merged PR branches are deleted automatically, and the generated card branch
-  remains protected from deletion. Keep issues available for non-sensitive
-  reports; do not post credentials or private source data in public issues.
+- Issues, discussions, projects, the wiki, legacy downloads, Pages, and private
+  vulnerability reporting are disabled for this personal profile repository.
+  PR creation is restricted to collaborators, preserving the owner's protected
+  maintenance path. Merged PR branches are deleted automatically, while the
+  generated card branch remains protected from deletion.
+- Repository interactions are restricted to collaborators for GitHub's maximum
+  six-month duration. Check the live `interaction-limits.expires_at` and renew
+  before it expires; GitHub offers no permanent setting for this restriction.
+  Closed maintenance PR threads are locked. These comment restrictions supplement
+  the permanent feature and PR-creation settings; they do not make public content
+  unreadable or prevent forking.
 
 This workflow contains no LLM, agent, issue-comment handler, or privileged
 `pull_request_target`/`workflow_run` trigger. It never interprets PR text, issues,
