@@ -9,12 +9,8 @@ on:
     paths:
       - scripts/**
       - tests/**
-      - .github/workflows/refresh.yml
+      - .github/**
   pull_request:
-    paths:
-      - scripts/**
-      - tests/**
-      - .github/workflows/refresh.yml
 
 permissions:
   contents: read
@@ -32,15 +28,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Test collection, privacy, and rendering
-        run: python3 -m unittest discover -s tests -v
+        run: python3 -I -m unittest discover -s tests -v
 
   render:
     needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'pbuffolino/pbuffolino' &&
+      contains(fromJSON('["schedule", "workflow_dispatch", "push"]'), github.event_name) &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: profile-data
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      card: ${{ steps.card.outputs.card }}
     steps:
       - name: Check for PROFILE_TOKEN
         env:
@@ -54,26 +56,130 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Render card
+        id: card
         env:
           GH_TOKEN: ${{ secrets.PROFILE_TOKEN }}
-        run: python3 scripts/render_token.py
-
-      - name: Commit if changed
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- assets/id_token.svg
-          if git diff --cached --quiet; then
-            echo 'Card already current.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            git commit -m "Refresh id_token card"
-            git push origin HEAD:refs/heads/main
-            echo 'Validated card committed and pushed to main.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          python3 -I scripts/render_token.py
+          python3 -I - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          card = Path('assets/id_token.svg').read_bytes()
+          if len(card) > 80_000:
+              raise SystemExit('Card exceeds its transfer limit.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('card=' + base64.b64encode(card).decode('ascii') + '\n')
+          PY
 
       - name: Report refresh failure
         if: failure()
         run: |
           echo 'Refresh failed. Check the failed step and docs/automation.md. The workflow never publishes partial API results.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: render
+    if: >-
+      github.repository == 'pbuffolino/pbuffolino' &&
+      contains(fromJSON('["schedule", "workflow_dispatch", "push"]'), github.event_name) &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Fresh runner, no checkout, artifacts, caches, or repository code execution.
+      # Only the workflow itself is trusted code in this write-capable job.
+      - name: Validate and publish only the card
+        env:
+          CARD_B64: ${{ needs.render.outputs.card }}
+          SOURCE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  raise ValueError('Redirect rejected')
+
+          def publish():
+              # Independently validate untrusted job output before any write.
+              encoded = os.environ['CARD_B64']
+              if len(encoded) > 106_668:
+                  raise ValueError('Card too large')
+              raw = base64.b64decode(encoded, validate=True)
+              svg = raw.decode('utf-8')
+              if len(raw) > 80_000 or '<!' in svg or '<?' in svg:
+                  raise ValueError('Invalid XML')
+              root = ET.fromstring(svg)
+              namespace = '{http://www.w3.org/2000/svg}'
+              tags = {namespace + tag for tag in ('svg', 'metadata', 'rect', 'text', 'tspan', 'path')}
+              attrs = {'width', 'height', 'viewBox', 'role', 'aria-label', 'x', 'y', 'rx',
+                       'fill', 'opacity', 'font-family', 'font-size', 'font-weight', 'text-anchor',
+                       'd', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
+                       '{http://www.w3.org/XML/1998/namespace}space'}
+              if root.tag != namespace + 'svg':
+                  raise ValueError('Not SVG')
+              for node in root.iter():
+                  if node.tag not in tags:
+                      raise ValueError('Unexpected element')
+                  for name, value in node.attrib.items():
+                      if name not in attrs or re.search(r'[\\()\x00-\x1f\x7f]', value):
+                          raise ValueError('Unexpected attribute')
+              source = os.environ['SOURCE_SHA']
+              if not re.fullmatch('[0-9a-f]{40}', source):
+                  raise ValueError('Invalid source revision')
+              opener = urllib.request.build_opener(NoRedirect)
+
+              def api(path, payload=None, method=None):
+                  body = None if payload is None else json.dumps(payload).encode()
+                  request = urllib.request.Request(
+                      'https://api.github.com/repos/pbuffolino/pbuffolino/' + path,
+                      data=body, method=method,
+                      headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                               'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
+                               'User-Agent': 'weekly-profile-publisher'})
+                  try:
+                      with opener.open(request, timeout=20) as response:
+                          data = response.read(2_000_001)
+                  except urllib.error.HTTPError as error:
+                      error.close()
+                      raise ValueError('GitHub API request failed') from None
+                  if len(data) > 2_000_000:
+                      raise ValueError('Response too large')
+                  return json.loads(data)
+
+              if api('git/ref/heads/main')['object']['sha'] != source:
+                  raise ValueError('Main advanced; rerun on current main')
+              parent = api('git/ref/heads/profile-card')['object']['sha']
+              tree = api('git/commits/' + parent)['tree']['sha']
+              blob = api('git/blobs', {'content': encoded, 'encoding': 'base64'})['sha']
+              tree = api('git/trees', {'base_tree': tree, 'tree': [
+                  {'path': 'assets/id_token.svg', 'mode': '100644', 'type': 'blob', 'sha': blob}]})['sha']
+              commit = api('git/commits', {'message': 'Refresh id_token card from main ' + source,
+                                          'tree': tree, 'parents': [parent]})['sha']
+              api('git/refs/heads/profile-card', {'sha': commit, 'force': False}, method='PATCH')
+              if api('git/ref/heads/profile-card')['object']['sha'] != commit:
+                  raise ValueError('Publication readback did not match')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                  summary.write('Validated card published to profile-card; commit: ' + commit + '\n')
+
+          try:
+              publish()
+          except Exception:
+              # Never echo response bodies, job output, or credential-bearing errors.
+              print('Publication failed. Check repository protections and rerun on current main.', file=sys.stderr)
+              sys.exit(1)
+          PY
