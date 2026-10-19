@@ -1,7 +1,9 @@
 # Contribution total regression, local issue draft
 
-Status: fix implemented locally, runtime publication pending. GitHub issue tracking
-is unavailable because this repository has Issues disabled. Checked open/closed issue records and PRs 1 through 5 on
+Status: tracked in [PR 6](https://github.com/pbuffolino/pbuffolino/pull/6), whose
+description carries the current CI, merge, and runtime acceptance receipts.
+GitHub issue tracking is unavailable because this repository has Issues disabled.
+Checked open/closed issue records and PRs 1 through 5 on
 2026-10-19 UTC; no existing tracking record covers this regression. Do not enable
 Issues or change repository interaction controls to file this draft.
 
@@ -71,8 +73,8 @@ unavailable-source rejection, malformed/partial HTML, leap-year coverage, zero
 years, credential isolation, and existing failure-preservation boundaries.
 Live owner-authenticated collection and SVG validation passed, returning 6,555
 contributions across 292 elapsed UTC dates and 26 owned non-fork repositories.
-Workflow lint and whitespace checks passed. CI, merge, and publication readback
-are pending.
+Workflow lint and whitespace checks passed. This is the pre-merge validation
+snapshot; see PR 6 for subsequent CI, merge, and publication readback receipts.
 
 Exclusions: upstream attribution/organization details, raw commits on all branches,
 future scheduler delivery, and every GitHub profile cache variant are not audited.
