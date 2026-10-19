@@ -94,6 +94,23 @@ class CalendarTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
+    def setUp(self):
+        self.profile = patch.object(card, "fetch_profile_calendar", return_value={START: 5}).start()
+        self.addCleanup(patch.stopall)
+
+    def test_full_profile_replaces_smaller_api_without_double_counting(self):
+        self.profile.return_value = {START: 6555}
+        cal, _, _ = card.fetch(FakeAPI(), "pbuffolino", START, START)
+        self.assertEqual(sum(cal.values()), 6555)
+
+    def test_public_calendar_below_api_or_unavailable_is_fatal(self):
+        self.profile.return_value = {START: 4}
+        with self.assertRaisesRegex(card.RefreshError, "behind the API"):
+            card.fetch(FakeAPI(), "pbuffolino", START, START)
+        self.profile.side_effect = card.RefreshError("Public calendar unavailable")
+        with self.assertRaises(card.RefreshError):
+            card.fetch(FakeAPI(), "pbuffolino", START, START)
+
     def test_private_aggregates_and_top_languages(self):
         api = FakeAPI(repos=[repo(), repo("public", private=False), repo("fork", fork=True)])
         cal, languages, n_repos = card.fetch(api, "pbuffolino", START, START)
@@ -119,6 +136,7 @@ class CollectionTests(unittest.TestCase):
                 card.fetch(api, "pbuffolino", START, START)
 
     def test_zero_current_year_uses_previous_year_private_evidence(self):
+        self.profile.return_value = {START: 0}
         api = FakeAPI(current=collection(private=0, public=0),
                       previous=collection(dt.date(2025, 1, 1), dt.date(2025, 12, 31)))
         self.assertEqual(sum(card.fetch(api, "pbuffolino", START, START)[0].values()), 0)
@@ -133,7 +151,7 @@ class CollectionTests(unittest.TestCase):
         data = collection(private=0)
         data["commitContributionsByRepository"] = [
             {"repository": {"isPrivate": True}, "contributions": {"totalCount": 3}}]
-        self.assertEqual(sum(card.fetch(FakeAPI(current=data), "pbuffolino", START, START)[0].values()), 3)
+        self.assertEqual(sum(card.fetch(FakeAPI(current=data), "pbuffolino", START, START)[0].values()), 5)
 
     def test_public_only_repository_access_fails(self):
         with self.assertRaisesRegex(card.RefreshError, "private repositories"):
@@ -170,6 +188,73 @@ class CollectionTests(unittest.TestCase):
         for entry in (repo("../escape"), repo(private=1), repo(fork="false")):
             with self.subTest(entry=entry), self.assertRaises(card.RefreshError):
                 card.fetch(FakeAPI(repos=[entry]), "pbuffolino", START, START)
+
+
+def profile_document(start=START, value=6555):
+    end = dt.date(start.year, 12, 31)
+    parts = [f'<h2 id="js-contribution-activity-description">{value:,} contributions in {start.year}</h2>']
+    for offset in range((end - start).days + 1):
+        date = start + dt.timedelta(days=offset)
+        key = f"contribution-day-component-{offset}"
+        label = f"{value:,} contributions" if offset == 0 and value else "No contributions"
+        parts.append(f'<td data-date="{date}" id="{key}"></td>'
+                     f'<tool-tip for="{key}">{label} on {date:%B} {date.day}th.</tool-tip>')
+    return "".join(parts)
+
+
+class ProfileCalendarTests(unittest.TestCase):
+    def test_full_year_coverage_daily_sum_and_zero_future_days(self):
+        cal = card.profile_calendar(profile_document(), START, START)
+        self.assertEqual(cal, {START: 6555})
+        start, end = dt.date(2024, 1, 1), dt.date(2024, 12, 31)
+        cal = card.profile_calendar(profile_document(start, value=0), start, end)
+        self.assertEqual((len(cal), sum(cal.values())), (366, 0))
+
+    def test_markup_changes_partial_dates_bad_counts_and_mismatched_sum_fail(self):
+        original = profile_document()
+        for document in (
+            "<html>Sign in or retry</html>",
+            original.replace('id="js-contribution-activity-description"', 'id="changed"'),
+            original.replace("6,555 contributions in", "6,554 contributions in"),
+            original.replace('data-date="2026-01-01"', 'data-date="2025-12-31"'),
+            original.replace('data-date="2026-01-02"', 'data-date="2026-01-01"'),
+            original.replace('data-date="2026-01-02"', 'other="2026-01-02"'),
+            original.replace("6,555 contributions on", "private-sentinel contributions on"),
+            original.replace("6,555", "6,,555"),
+            original.replace("No contributions on January 2th.", "1 contribution on January 2th."),
+            original + '<td id="contribution-day-component-0" data-date="2026-01-01"></td>',
+        ):
+            with self.subTest(document=document[:80]), self.assertRaises(card.RefreshError):
+                card.profile_calendar(document, START, START)
+
+    @patch.object(card.urllib.request.OpenerDirector, "open")
+    def test_public_request_has_no_authorization_or_cookie(self, urlopen):
+        urlopen.return_value = io.BytesIO(profile_document().encode())
+        with patch.dict(os.environ, {"GH_TOKEN": "token-sentinel"}):
+            self.assertEqual(card.fetch_profile_calendar("pbuffolino", START, START), {START: 6555})
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url,
+                         "https://github.com/users/pbuffolino/contributions?from=2026-01-01&to=2026-01-01")
+        self.assertIsNone(request.get_header("Authorization"))
+        self.assertIsNone(request.get_header("Cookie"))
+
+    @patch.object(card.time, "sleep")
+    @patch.object(card.urllib.request.OpenerDirector, "open")
+    def test_public_errors_retry_with_bounds_and_never_echo_response(self, urlopen, sleep):
+        urlopen.side_effect = urllib.error.HTTPError("private-sentinel", 503, "token-sentinel", {}, None)
+        with self.assertRaisesRegex(card.RefreshError, "HTTP 503") as error:
+            card.fetch_profile_calendar("pbuffolino", START, START)
+        self.assertNotIn("sentinel", str(error.exception))
+        self.assertEqual((urlopen.call_count, sleep.call_count), (3, 2))
+
+    @patch.object(card.urllib.request.OpenerDirector, "open")
+    def test_public_request_invalid_login_and_oversize_are_rejected(self, urlopen):
+        with self.assertRaises(card.RefreshError):
+            card.fetch_profile_calendar("../escape", START, START)
+        urlopen.assert_not_called()
+        urlopen.return_value = io.BytesIO(b" " * (card.MAX_RESPONSE_BYTES + 1))
+        with self.assertRaisesRegex(card.RefreshError, "safety limit"):
+            card.fetch_profile_calendar("pbuffolino", START, START)
 
 
 class RequestTests(unittest.TestCase):
@@ -277,6 +362,8 @@ class PublicationTests(unittest.TestCase):
             metadata = json.loads(root.find("{http://www.w3.org/2000/svg}metadata").text)
             self.assertEqual(metadata["fetched_at"], now.isoformat())
             self.assertTrue(metadata["private_contributions_verified"])
+            self.assertEqual(metadata["contribution_source"], "github-public-profile")
+            self.assertEqual(metadata["contribution_total"], 0)
             self.assertNotIn("<script", svg)
             self.assertIn("&lt;", svg)
 
