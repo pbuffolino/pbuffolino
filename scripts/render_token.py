@@ -3,7 +3,8 @@
 The signature strip shows daily GitHub contributions for the current year,
 with a 7-day average. Private activity is included only after verification.
 
-Data comes directly from the GitHub API (GH_TOKEN in Actions).
+Contribution counts come from the public GitHub profile calendar. The authenticated
+API (GH_TOKEN in Actions) verifies private access and supplies language aggregates.
 Only totals are computed and nothing about individual repos is printed,
 because this repo's workflow logs are public.
 
@@ -13,6 +14,7 @@ import argparse
 import base64
 import datetime as dt
 import html
+from html.parser import HTMLParser
 import http.client
 import json
 import os
@@ -35,6 +37,7 @@ CH, CP, CS, CN = "#ff8a7a", "#c3a6ff", "#5fd4c4", "#f3c77b"
 NS = "https://seeknay.com/claims"
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_SVG_BYTES = 80_000
+COUNT_TEXT = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
 SVG_TAGS = {"svg", "metadata", "rect", "text", "tspan", "path"}
 SVG_ATTRS = {"width", "height", "viewBox", "role", "aria-label", "x", "y", "rx",
              "fill", "opacity", "font-family", "font-size", "font-weight", "text-anchor",
@@ -64,6 +67,99 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward the data credential to a redirect destination.
         raise RefreshError("Unexpected GitHub API redirect; retry after checking repository access.")
+
+
+class ProfileCalendar(HTMLParser):
+    """Read only dates, tooltip counts, and the public calendar's total heading."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.cells, self.tooltips, self.headings = {}, {}, []
+        self.active_tip = None
+        self.heading = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "td" and "data-date" in attrs:
+            key = attrs.get("id")
+            if not key or key in self.cells:
+                raise RefreshError("Public contribution calendar contains duplicate or invalid cells.")
+            self.cells[key] = dt.date.fromisoformat(attrs["data-date"])
+        if tag == "tool-tip" and attrs.get("for", "").startswith("contribution-day-component-"):
+            key = attrs["for"]
+            if key in self.tooltips:
+                raise RefreshError("Public contribution calendar contains duplicate counts.")
+            self.active_tip = key
+            self.tooltips[key] = ""
+        if tag == "h2" and attrs.get("id") == "js-contribution-activity-description":
+            self.heading = ""
+
+    def handle_data(self, data):
+        if self.active_tip is not None:
+            self.tooltips[self.active_tip] += data
+        if self.heading is not None:
+            self.heading += data
+
+    def handle_endtag(self, tag):
+        if tag == "tool-tip":
+            self.active_tip = None
+        if tag == "h2" and self.heading is not None:
+            self.headings.append(" ".join(self.heading.split()))
+            self.heading = None
+
+
+def profile_calendar(document, start, end):
+    parser = ProfileCalendar()
+    parser.feed(document)
+    parser.close()
+    expected_heading = rf"({COUNT_TEXT}) contributions? in {start.year}"
+    match = re.fullmatch(expected_heading, parser.headings[0]) if len(parser.headings) == 1 else None
+    if not match or start.year != end.year or start != dt.date(start.year, 1, 1):
+        raise RefreshError("Public contribution calendar heading is missing or changed.")
+    total = int(match[1].replace(",", ""))
+    days = {}
+    for key, date in parser.cells.items():
+        tooltip = parser.tooltips.get(key, "").strip()
+        count_match = re.fullmatch(
+            rf"(No|{COUNT_TEXT}) contributions? on [A-Za-z]+ [0-9]+(?:st|nd|rd|th)\.", tooltip)
+        if not count_match or date in days or date.year != start.year:
+            raise RefreshError("Public contribution calendar dates or counts are incomplete.")
+        days[date] = 0 if count_match[1] == "No" else int(count_match[1].replace(",", ""))
+    year_end = dt.date(start.year, 12, 31)
+    if (len(days) != (year_end - start).days + 1 or sum(days.values()) != total
+            or any(value for date, value in days.items() if date > end)):
+        raise RefreshError("Public contribution totals or date coverage are incomplete; no card was published.")
+    return {date: value for date, value in days.items() if date <= end}
+
+
+def fetch_profile_calendar(login, start, end):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", login):
+        raise RefreshError("Invalid GitHub login.")
+    # Public aggregates only. This opener never receives the private-data token.
+    request = urllib.request.Request(
+        f"https://github.com/users/{login}/contributions?from={start}&to={end}",
+        headers={"Accept": "text/html", "Accept-Language": "en-US", "User-Agent": "weekly-profile-card"})
+    opener = urllib.request.build_opener(NoRedirect)
+    for attempt in range(3):
+        try:
+            with opener.open(request, timeout=20) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise RefreshError("Public contribution calendar exceeded its safety limit.")
+                document = raw.decode("utf-8")
+            return profile_calendar(document, start, end)
+        except urllib.error.HTTPError as error:
+            status = error.code
+            retry = status in (429, 500, 502, 503, 504)
+            error.close()
+            if not retry or attempt == 2:
+                raise RefreshError(f"Public contribution calendar failed (HTTP {status}); no card was published.") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+            if attempt == 2:
+                raise RefreshError("Public contribution calendar connection failed; retry later.") from None
+        except UnicodeError:
+            raise RefreshError("Public contribution calendar encoding is invalid.") from None
+        time.sleep(2 ** attempt)
 
 
 class GitHub:
@@ -164,7 +260,7 @@ def private_evidence(collection):
 def fetch(api, login, jan1, today):
     viewer = api.collection(login, jan1, today)
     collection = viewer["contributionsCollection"]
-    cal = calendar(collection, jan1, today)
+    api_cal = calendar(collection, jan1, today)
     private_count = count(viewer["repositories"]["totalCount"])
     if not private_count:
         raise RefreshError("No owned private repositories are visible; check PROFILE_TOKEN access.")
@@ -175,6 +271,12 @@ def fetch(api, login, jan1, today):
         calendar(previous, start, end)
         if not private_evidence(previous):
             raise RefreshError("Private contribution visibility could not be verified; no card was published.")
+
+    cal = fetch_profile_calendar(login, jan1, today)
+    # Some private activity in GraphQL does not establish full profile coverage.
+    # Never add these overlapping totals or substitute the smaller API calendar.
+    if sum(cal.values()) < sum(api_cal.values()):
+        raise RefreshError("Public contribution calendar is behind the API; retry later. No card was published.")
 
     repos = []
     for page in range(1, 1001):
@@ -280,7 +382,7 @@ def render(login, now, cal, langs):
 
     o.append(T(32, y, "Signature", 12.5, CS))
     o.append(T(110, y, "empty, as alg: none requires", 12, MUTE))
-    o.append(T(W - 32, y, f"{sum(daily):,} GitHub contributions, {now.year}", 12, MUTE, anchor="end"))
+    o.append(T(W - 32, y, f"{sum(daily):,} GitHub contributions, all repos, {now.year}", 12, MUTE, anchor="end"))
     sh = 64
     base, mx, bw = y + 22 + sh, max(max(daily), 1), (W - 64) / len(daily)
     for i, v in enumerate(daily):
@@ -314,7 +416,7 @@ def render(login, now, cal, langs):
     H = lg + 22
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
             f'aria-label="Profile summary styled as a decoded ID token">'
-            f'<metadata>{E(json.dumps({"fetched_at": now.isoformat(), "private_contributions_verified": True}))}</metadata>'
+            f'<metadata>{E(json.dumps({"fetched_at": now.isoformat(), "private_contributions_verified": True, "contribution_source": "github-public-profile", "contribution_total": sum(daily)}))}</metadata>'
             f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>' + "".join(o) + "</svg>")
 
 
@@ -365,6 +467,7 @@ def main():
         summary = (f"Fetched at: {fetched.isoformat()}\n"
                    f"GitHub contributions: {sum(cal.values())}\n"
                    f"Owned non-fork repositories: {n_repos}\n"
+                   "Contribution source: public GitHub profile calendar, daily sum verified\n"
                    "Private contribution visibility: verified\n")
         print(summary, end="")
         if os.environ.get("GITHUB_STEP_SUMMARY"):

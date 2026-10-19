@@ -7,8 +7,13 @@ data and publish. The generated SVG is committed to `profile-card`, and the
 README loads that branch's image. The copy under `main` is a checked-in fallback,
 not the automatically refreshed asset.
 
-The card includes the current UTC year's GitHub contribution calendar and a
-trailing seven-day average (shortened at the start of January). Languages are
+The card includes the current UTC year's public GitHub profile contribution
+calendar and a trailing seven-day average (shortened at the start of January).
+Counts come from GitHub's public calendar HTML, including the anonymized private
+activity the owner chooses to display. The collector requires every day of the
+year, zero counts after the collection date, and agreement between daily counts
+and GitHub's displayed year total. It reads only calendar cells, count tooltips,
+and the total heading. The HTML is never rendered or executed. Languages are
 the top three by repository language bytes across visible owned non-fork
 repositories, including private repositories. They are not authored-code shares.
 Biography, links, interests, and other static claims remain manually maintained.
@@ -34,9 +39,11 @@ Biography, links, interests, and other static claims remain manually maintained.
    Never put its value in a commit, issue, workflow log, or chat.
 3. Enable private contribution counts in the GitHub profile's contribution
    settings if anonymous private activity should be included. The token's
-   actual contribution visibility is tested during collection, rather than
+   API's private contribution visibility is tested during collection, rather than
    inferred from its configured permissions. The generator accepts verified
    anonymized restricted activity as well as directly visible private commits.
+   This proves some private visibility, not full profile calendar coverage. The
+   public profile calendar supplies the displayed counts independently.
 4. Run the workflow manually on `main`. Require green render and publish jobs and a
    summary reporting verified private visibility. If permissions do not expose
    the required data, stop and review the failed setup; do not substitute a
@@ -96,8 +103,10 @@ Verify these GitHub settings before saving the token:
 This workflow contains no LLM, agent, issue-comment handler, or privileged
 `pull_request_target`/`workflow_run` trigger. It never interprets PR text, issues,
 commit messages, repository descriptions, or API responses as instructions.
-HTTP requests go only to fixed GitHub API endpoints, reject redirects, and cap
-response sizes. SVG validation permits only the renderer's passive element and
+Authenticated HTTP requests go only to fixed GitHub API endpoints. A separate
+request to `https://github.com/users/<validated-login>/contributions` reads the
+public calendar with no authorization header or cookies. Both paths reject
+redirects, cap response sizes, and sanitize failures. SVG validation permits only the renderer's passive element and
 attribute vocabulary; scripts, event handlers, CSS, external resources, XML
 entities, and processing instructions are rejected. Python runs in isolated mode.
 
@@ -159,7 +168,7 @@ account-level check appear complete.
 ## Verification and failure behavior
 
 Each run checks the authenticated owner, owned private repository visibility,
-complete UTC calendar dates, daily and aggregate contribution totals, repository
+complete calendar dates, daily and aggregate contribution totals, repository
 pagination, and language responses. A current year without private activity is
 checked against the previous year for private-visibility evidence. If neither
 year provides evidence, the run fails. Empty repositories and a current-year
@@ -169,9 +178,38 @@ Owned non-fork private repository coverage is checked between GraphQL and REST.
 Private forks can be omitted by REST and are excluded from the language totals.
 A token scoped to a
 subset can hide repositories from both APIs, so the **All repositories** setup
-choice matters. Calendar totals reflect what GitHub exposes to that credential
-and the user's private contribution settings, not an independent audit of every
-commit in every repository or organization.
+choice matters for language aggregation. The contribution count uses the public
+profile calendar because an API calendar can omit activity even when restricted
+contributions are nonzero and its own aggregate totals reconcile. The public
+calendar must be at least as large as the API calendar; otherwise the run fails
+and must be retried after GitHub's views converge. These overlapping totals are
+never added. If the public calendar is unavailable or its markup changes, fail
+and preserve the previous asset; never fall back to API-only counts.
+
+The label "all repos" means GitHub's full published profile calendar, including
+public and anonymized private contributions. GitHub's contribution criteria still
+apply; this is not a raw count of every commit on every branch. Public calendar
+markup is not a versioned API contract, so parser failure requires maintenance.
+It is not an independent audit of private organizations or attribution settings.
+
+### Contribution coverage regression
+
+The original card reported 6,252 contributions. The first automated collector
+used only the authenticated API calendar; the 2026-10-18 scheduled run published
+1,687 despite passing its private-visibility and internal-reconciliation checks.
+At investigation on 2026-10-19 UTC, GitHub's unauthenticated public calendar
+reported 6,555 and the API reported 1,764. Both the browser heading and the public
+daily sum verified the larger count. The exact upstream reason for the difference
+is unverified; changing `user` to `viewer` did not explain it, and the original
+raw-commit split never increased the displayed calendar total.
+
+Regression coverage now checks that a larger public calendar replaces the API
+total without double counting, an unavailable or smaller public calendar stops
+publication, malformed/partial markup fails, and public requests receive no token.
+For future source or credential changes, compare against the public profile for
+the same year before accepting API reconciliation as full coverage. See
+[the local tracking draft](contribution-coverage-issue.md); repository Issues
+remain disabled under the existing security policy.
 
 Transient network errors, rate limits, and HTTP 5xx responses get at most three
 attempts per request, with 20-second timeouts and bounded backoff. Other errors
