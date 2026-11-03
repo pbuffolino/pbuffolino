@@ -2,8 +2,8 @@
 
 The `Refresh id_token card` workflow runs Sundays at 06:17 UTC, on changes to
 its generator/tests/workflow on `main`, and through **Actions → Run workflow**.
-PRs run offline tests without private credentials. Only runs from `main` collect
-data and publish. The generated SVG is committed to `profile-card`, and the
+PRs are validated locally and independently reviewed by Codex. Only runs from
+`main` collect data and publish. The generated SVG is committed to `profile-card`, and the
 README loads that branch's image. The copy under `main` is a checked-in fallback,
 not the automatically refreshed asset.
 
@@ -67,8 +67,10 @@ process memory and are never saved as artifacts or printed.
 
 Verify these GitHub settings before saving the token:
 
-- Active rulesets require a PR and the GitHub Actions `test` check for `main`,
-  with no bypass actors. Both `main` and `profile-card` reject force pushes and
+- Active rulesets require a PR for `main`, with no bypass actors. The retired
+  GitHub Actions `test` context is replaced by exact-head local validation and
+  independent Codex review recorded in the PR. Keep CodeQL and conversation
+  resolution requirements. Both `main` and `profile-card` reject force pushes and
   deletion. Generated commits target `profile-card`, so they need no exception
   to the rules protecting the workflow on `main`.
 - Actions allows only the exact reviewed `actions/checkout` commit used by the
@@ -236,11 +238,19 @@ the last known-good SVG on `profile-card` in a normal commit, fix the generator
 on `main` through a PR, then rerun. Never
 force-push or overwrite a failed fetch with zeroes.
 
-## Local validation
+## Local validation and Codex review
+
+Before merging, run the local command below on the exact candidate head and
+record its result in the PR. Obtain independent native Codex code and security
+review for changes to collection, publication or workflow trust boundaries.
+Reviewers must not be the implementer. Revalidate after fixes; missing tools or
+failed checks stop acceptance. The scheduled renderer and isolated publisher
+remain hosted because they deliver the weekly card, with runtime payload
+validation and credential boundaries preserved. No hosted PR test job remains.
+
 
 ```sh
-python3 -I -W error -m unittest discover -s tests -v
-actionlint .github/workflows/refresh.yml
+bash scripts/check-local.sh
 ```
 
 For an authenticated local preview, securely supply the dedicated token through
