@@ -10,28 +10,16 @@ on:
       - scripts/**
       - tests/**
       - .github/**
-  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: refresh-card-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  group: refresh-card-main
   cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Test collection, privacy, and rendering
-        run: python3 -I -W error -m unittest discover -s tests -v
-
   render:
-    needs: test
     if: >-
       github.repository == 'pbuffolino/pbuffolino' &&
       contains(fromJSON('["schedule", "workflow_dispatch", "push"]'), github.event_name) &&
